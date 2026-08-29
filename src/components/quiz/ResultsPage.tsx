@@ -34,6 +34,7 @@ export function ResultsPage() {
   const [resumeUrl, setResumeUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [copied, setCopied] = useState(false);
 
   if (!result) {
     return (
@@ -202,9 +203,24 @@ export function ResultsPage() {
           {saving ? "Saving…" : "Save progress"}
         </button>
         {resumeUrl && (
-          <p className="mt-3 break-all text-xs text-moss">
-            Resume anytime: {resumeUrl}
-          </p>
+          <div className="mt-3 space-y-2">
+            <p className="break-all text-xs text-moss">Resume anytime: {resumeUrl}</p>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(resumeUrl);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                } catch {
+                  setSaveError("Could not copy — select the link above.");
+                }
+              }}
+              className="text-xs text-clay underline"
+            >
+              {copied ? "Copied" : "Copy resume link"}
+            </button>
+          </div>
         )}
         {saveError && <p className="mt-2 text-sm text-terracotta">{saveError}</p>}
         <button
