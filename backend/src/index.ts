@@ -140,5 +140,10 @@ const port = Number(process.env.PORT || 3001);
 app.listen(port, () => {
   console.log(`[milc] server listening on http://localhost:${port}`);
   console.log(`[milc] Gemini model target: ${geminiModelId()}`);
+  if (process.env.GEMINI_MODEL === "gemini-2.5-flash") {
+    console.warn(
+      "[milc] GEMINI_MODEL=gemini-2.5-flash is retired for new users. Use gemini-3-flash-preview in backend/.env",
+    );
+  }
   console.log(`[milc] AI mode: ${hasGeminiKey() ? "key set" : "fallback (no key)"}`);
 });

@@ -4,14 +4,17 @@ import { emptyTrait } from "@milc/shared";
 const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
 
 function modelPreferences(): string[] {
-  return [
-    process.env.GEMINI_MODEL,
+  const env = process.env.GEMINI_MODEL;
+  const defaults = [
     DEFAULT_GEMINI_MODEL,
     "gemini-flash-latest",
-    "gemini-2.5-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-  ].filter((m): m is string => Boolean(m));
+    "gemini-3.7-flash",
+    "gemini-2.5-flash",
+  ];
+  if (env) return [env, ...defaults.filter((d) => d !== env)];
+  return defaults;
 }
 
 let lastSuccessfulModel: string | null = null;
@@ -121,7 +124,7 @@ export function geminiAccessHint(err: unknown): string {
     return `Google AI denied this model (403). In backend/.env set GEMINI_MODEL=gemini-2.5-flash (must match a model with quota in AI Studio → Rate Limit).`;
   }
   if (err instanceof GeminiApiError && err.status === 404) {
-    return `Model not found (404). Set GEMINI_MODEL to one you have quota for, e.g. gemini-2.5-flash or gemini-3-flash.`;
+    return `Model not found or retired for new users (404). Set GEMINI_MODEL=gemini-3-flash-preview in backend/.env — not gemini-2.5-flash.`;
   }
   if (err instanceof GeminiApiError && err.status === 429) {
     return "Gemini quota exceeded (429). Free tier is about 20 requests/day — wait until tomorrow, avoid refreshing /api/health repeatedly, or enable billing in AI Studio.";
@@ -198,7 +201,8 @@ export async function probeGeminiAccess(): Promise<{
   const ranked = rankDiscoveredModels(
     availableModels.length ? availableModels : modelPreferences(),
   );
-  const toTry = cachedWorkingModel ? [cachedWorkingModel] : ranked.slice(0, 1);
+  const toTry = cachedWorkingModel ? [cachedWorkingModel] : ranked.slice(0, MAX_MODEL_ATTEMPTS);
+  const failures: string[] = [];
 
   for (const model of toTry) {
     try {
@@ -208,7 +212,7 @@ export async function probeGeminiAccess(): Promise<{
         reachable: true,
         model,
         availableModels,
-        modelsTried: toTry,
+        modelsTried: failures.length ? [...failures.map((f) => f.split(" ")[0]), model] : toTry,
       };
     } catch (err) {
       if (err instanceof GeminiApiError && err.status === 429) {
@@ -221,12 +225,14 @@ export async function probeGeminiAccess(): Promise<{
         };
       }
       if (err instanceof GeminiApiError && (err.status === 403 || err.status === 404)) {
-        return {
-          reachable: false,
-          availableModels,
-          modelsTried: toTry,
-          error: err.message.slice(0, 320),
-        };
+        failures.push(`${model} (${err.status})`);
+        cachedWorkingModel = null;
+        if (model === process.env.GEMINI_MODEL) {
+          console.warn(
+            `[milc] GEMINI_MODEL=${model} is unavailable (${err.status}). Trying next model — update backend/.env to gemini-3-flash-preview`,
+          );
+        }
+        continue;
       }
       return {
         reachable: false,
@@ -237,7 +243,15 @@ export async function probeGeminiAccess(): Promise<{
     }
   }
 
-  return { reachable: false, availableModels, modelsTried: toTry, error: "No model to probe." };
+  return {
+    reachable: false,
+    availableModels,
+    modelsTried: toTry,
+    error:
+      failures.length > 0
+        ? `Models unavailable: ${failures.join(", ")}. Set GEMINI_MODEL=gemini-3-flash-preview in backend/.env (gemini-2.5-flash is retired for new users).`
+        : "No model to probe.",
+  };
 }
 
 function offlineImageCheck(imageDataUrl: string): ModerationResult {
