@@ -3,15 +3,19 @@ import { emptyTrait } from "@milc/shared";
 
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 
-/** Models your AI Studio Rate Limit page must show with quota (not 0/0). */
-const MODEL_FALLBACK_CHAIN = [
+/** Preferred order when multiple models are available to this API key. */
+const MODEL_PREFERENCES = [
   process.env.GEMINI_MODEL,
   DEFAULT_GEMINI_MODEL,
+  "gemini-3-flash-preview",
   "gemini-3-flash",
-  "gemini-2.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.6-flash",
 ].filter((m): m is string => Boolean(m));
 
 let lastSuccessfulModel: string | null = null;
+let cachedModelList: { ids: string[]; at: number } | null = null;
+const MODEL_CACHE_MS = 5 * 60 * 1000;
 
 const ANALYZER_PROMPT = `You are an expert dermatological computer vision analyzer. Your task is to evaluate uploaded image(s) of a user's face and accurately detect visible surface traits.
 
@@ -99,13 +103,13 @@ export class GeminiApiError extends Error {
   }
 }
 
-/** True when Google blocked the project/key or rate limits were hit. */
+/** True when we should fall back instead of surfacing a raw Gemini error. */
 export function isGeminiAccessBlocked(err: unknown): boolean {
   if (err instanceof GeminiApiError) {
-    return err.status === 403 || err.status === 401 || err.status === 429;
+    return err.status === 403 || err.status === 401 || err.status === 404 || err.status === 429;
   }
   const msg = err instanceof Error ? err.message : String(err);
-  return /403|401|429|PERMISSION_DENIED|denied access|rate limit|quota/i.test(msg);
+  return /403|401|404|429|PERMISSION_DENIED|denied access|no longer available|not found|rate limit|quota/i.test(msg);
 }
 
 export function geminiAccessHint(err: unknown): string {
@@ -121,21 +125,84 @@ export function geminiAccessHint(err: unknown): string {
   return "Gemini was unavailable — results used your quiz answers instead of the photo.";
 }
 
+export async function listAvailableGeminiModels(): Promise<string[]> {
+  if (cachedModelList && Date.now() - cachedModelList.at < MODEL_CACHE_MS) {
+    return cachedModelList.ids;
+  }
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return [];
+
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+    if (!res.ok) return [];
+
+    const json = (await res.json()) as {
+      models?: { name?: string; supportedGenerationMethods?: string[] }[];
+    };
+
+    const ids = (json.models ?? [])
+      .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
+      .map((m) => (m.name ?? "").replace(/^models\//, ""))
+      .filter(Boolean)
+      .filter(
+        (id) =>
+          /gemini/i.test(id) &&
+          /flash/i.test(id) &&
+          !/tts|image|live|embedding|robotics|native-audio|computer-use/i.test(id),
+      );
+
+    cachedModelList = { ids, at: Date.now() };
+    return ids;
+  } catch {
+    return [];
+  }
+}
+
+function rankDiscoveredModels(ids: string[]): string[] {
+  const ordered: string[] = [];
+  for (const preferred of MODEL_PREFERENCES) {
+    if (ids.includes(preferred) && !ordered.includes(preferred)) ordered.push(preferred);
+  }
+  for (const id of ids.sort()) {
+    if (!ordered.includes(id)) ordered.push(id);
+  }
+  return ordered;
+}
+
+async function modelChain(): Promise<string[]> {
+  const discovered = await listAvailableGeminiModels();
+  if (discovered.length) return rankDiscoveredModels(discovered);
+  return [...new Set(MODEL_PREFERENCES)];
+}
+
 export async function probeGeminiAccess(): Promise<{
   reachable: boolean;
   model?: string;
+  availableModels?: string[];
+  modelsTried?: string[];
   error?: string;
 }> {
   if (!hasGeminiKey()) {
     return { reachable: false, error: "GEMINI_API_KEY is not set" };
   }
+
+  const availableModels = await listAvailableGeminiModels();
+  const chain = await modelChain();
+
   try {
     await generateContent([{ text: 'Reply with JSON only: {"ok":true}' }]);
-    return { reachable: true, model: lastSuccessfulModel ?? geminiModelId() };
+    return {
+      reachable: true,
+      model: lastSuccessfulModel ?? geminiModelId(),
+      availableModels,
+      modelsTried: chain,
+    };
   } catch (err) {
     return {
       reachable: false,
-      error: err instanceof Error ? err.message.slice(0, 200) : String(err),
+      availableModels,
+      modelsTried: chain,
+      error: err instanceof Error ? err.message.slice(0, 320) : String(err),
     };
   }
 }
@@ -189,7 +256,8 @@ async function generateContentWithModel(model: string, parts: unknown[]): Promis
 }
 
 async function generateContent(parts: unknown[]): Promise<string> {
-  const tried = [...new Set(MODEL_FALLBACK_CHAIN)];
+  const tried = await modelChain();
+  const failures: string[] = [];
   let lastErr: unknown;
 
   for (const model of tried) {
@@ -198,6 +266,7 @@ async function generateContent(parts: unknown[]): Promise<string> {
     } catch (err) {
       lastErr = err;
       if (err instanceof GeminiApiError && (err.status === 403 || err.status === 404)) {
+        failures.push(`${model} (${err.status})`);
         console.warn(`[milc] Gemini model ${model} unavailable (${err.status}), trying next…`);
         continue;
       }
@@ -205,7 +274,12 @@ async function generateContent(parts: unknown[]): Promise<string> {
     }
   }
 
-  throw lastErr ?? new GeminiApiError(403, "No Gemini model in the fallback chain was reachable.");
+  throw new GeminiApiError(
+    404,
+    failures.length
+      ? `No reachable Gemini model for this API key. Tried: ${failures.join(", ")}`
+      : `No Gemini models configured. Set GEMINI_MODEL in backend/.env`,
+  );
 }
 
 function parseJson<T>(raw: string): T {

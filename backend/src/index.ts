@@ -26,6 +26,8 @@ app.get("/api/health", async (_req, res) => {
     aiMode: hasKey ? (probe.reachable ? "gemini" : "gemini-blocked") : "fallback",
     geminiModel: probe.model ?? geminiModelId(),
     geminiReachable: probe.reachable,
+    geminiModelsAvailable: probe.availableModels,
+    geminiModelsTried: probe.modelsTried,
     geminiError: probe.reachable ? undefined : probe.error,
   });
 });

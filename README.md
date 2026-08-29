@@ -67,13 +67,19 @@ Vision defaults to **`gemini-2.5-flash`** — match a model that shows quota in 
 - `gemini-3-flash`
 - `gemini-2.5-flash-lite`
 
-Put the model id in `backend/.env`:
+Put the model id in `backend/.env` (optional — the server auto-detects models your key can use):
 
 ```
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-`aiMode: "gemini"` in `/api/health` only meant a key was present. After this update, check **`geminiReachable: true`** — that means Google actually accepted the call.
+Check http://localhost:3001/api/health:
+
+- **`geminiReachable: true`** — Google accepted a call
+- **`geminiModelsAvailable`** — models your API key can list (from Google)
+- **`geminiModelsTried`** — order the server attempted
+
+Do not use retired ids like `gemini-2.5-flash-lite` (404 for new users).
 
 ### Gemini 403 “project has been denied access”
 
