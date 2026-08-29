@@ -81,6 +81,21 @@ Check http://localhost:3001/api/health:
 
 Do not use retired ids like `gemini-2.5-flash-lite` (404 for new users).
 
+### Gemini 429 quota exceeded
+
+Your health JSON showed **429** after trying many models — that burns free-tier quota fast (~**20 requests/day** on Flash). The server now uses **one model per session** and stops immediately on 429.
+
+If you see `"aiMode": "gemini-quota"`:
+
+1. **Wait** until your daily quota resets (check AI Studio → Rate Limit → RPD).
+2. Do **not** refresh `/api/health` repeatedly — each check uses 1 API call.
+3. Set one model in `backend/.env` (recommended for free tier):
+   ```
+   GEMINI_MODEL=gemini-3-flash-preview
+   ```
+4. Enable **billing** in AI Studio for higher limits.
+5. The quiz still completes via **offline fallback** when quota is gone.
+
 ### Gemini 403 “project has been denied access”
 
 Usually the **model id does not match your quota**. Models showing `0 / 0` in Rate Limit will return 403 or 404. Fix:

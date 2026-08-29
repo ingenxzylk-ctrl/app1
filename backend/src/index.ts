@@ -20,12 +20,20 @@ app.use(express.json({ limit: "12mb" }));
 app.get("/api/health", async (_req, res) => {
   const hasKey = hasGeminiKey();
   const probe = hasKey ? await probeGeminiAccess() : { reachable: false, error: "No API key" };
+  const aiMode = !hasKey
+    ? "fallback"
+    : probe.reachable
+      ? "gemini"
+      : probe.quotaExceeded
+        ? "gemini-quota"
+        : "gemini-blocked";
   res.json({
     ok: true,
     service: "milc-skin-analysis",
-    aiMode: hasKey ? (probe.reachable ? "gemini" : "gemini-blocked") : "fallback",
+    aiMode,
     geminiModel: probe.model ?? geminiModelId(),
     geminiReachable: probe.reachable,
+    geminiQuotaExceeded: Boolean(probe.quotaExceeded),
     geminiModelsAvailable: probe.availableModels,
     geminiModelsTried: probe.modelsTried,
     geminiError: probe.reachable ? undefined : probe.error,

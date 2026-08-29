@@ -1,21 +1,25 @@
 import type { Gender, ImageQuality, ModerationResult, SkinAIAnalysis, TraitFinding, TraitKey } from "@milc/shared";
 import { emptyTrait } from "@milc/shared";
 
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
 
-/** Preferred order when multiple models are available to this API key. */
-const MODEL_PREFERENCES = [
-  process.env.GEMINI_MODEL,
-  DEFAULT_GEMINI_MODEL,
-  "gemini-3-flash-preview",
-  "gemini-3-flash",
-  "gemini-3.1-flash-lite",
-  "gemini-3.6-flash",
-].filter((m): m is string => Boolean(m));
+function modelPreferences(): string[] {
+  return [
+    process.env.GEMINI_MODEL,
+    DEFAULT_GEMINI_MODEL,
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+  ].filter((m): m is string => Boolean(m));
+}
 
 let lastSuccessfulModel: string | null = null;
+/** Once a model succeeds, reuse it — do not burn quota cycling through every id. */
+let cachedWorkingModel: string | null = null;
 let cachedModelList: { ids: string[]; at: number } | null = null;
 const MODEL_CACHE_MS = 5 * 60 * 1000;
+const MAX_MODEL_ATTEMPTS = 2;
 
 const ANALYZER_PROMPT = `You are an expert dermatological computer vision analyzer. Your task is to evaluate uploaded image(s) of a user's face and accurately detect visible surface traits.
 
@@ -120,7 +124,7 @@ export function geminiAccessHint(err: unknown): string {
     return `Model not found (404). Set GEMINI_MODEL to one you have quota for, e.g. gemini-2.5-flash or gemini-3-flash.`;
   }
   if (err instanceof GeminiApiError && err.status === 429) {
-    return "Gemini rate limit reached. Wait a minute or raise limits in AI Studio → Rate Limit.";
+    return "Gemini quota exceeded (429). Free tier is about 20 requests/day — wait until tomorrow, avoid refreshing /api/health repeatedly, or enable billing in AI Studio.";
   }
   return "Gemini was unavailable — results used your quiz answers instead of the photo.";
 }
@@ -148,7 +152,9 @@ export async function listAvailableGeminiModels(): Promise<string[]> {
         (id) =>
           /gemini/i.test(id) &&
           /flash/i.test(id) &&
-          !/tts|image|live|embedding|robotics|native-audio|computer-use/i.test(id),
+          !/tts|image|live|embedding|robotics|native-audio|computer-use|omni|flash-lite|lite-latest|lite-preview/i.test(
+            id,
+          ),
       );
 
     cachedModelList = { ids, at: Date.now() };
@@ -160,7 +166,7 @@ export async function listAvailableGeminiModels(): Promise<string[]> {
 
 function rankDiscoveredModels(ids: string[]): string[] {
   const ordered: string[] = [];
-  for (const preferred of MODEL_PREFERENCES) {
+  for (const preferred of modelPreferences()) {
     if (ids.includes(preferred) && !ordered.includes(preferred)) ordered.push(preferred);
   }
   for (const id of ids.sort()) {
@@ -170,13 +176,15 @@ function rankDiscoveredModels(ids: string[]): string[] {
 }
 
 async function modelChain(): Promise<string[]> {
+  if (cachedWorkingModel) return [cachedWorkingModel];
   const discovered = await listAvailableGeminiModels();
-  if (discovered.length) return rankDiscoveredModels(discovered);
-  return [...new Set(MODEL_PREFERENCES)];
+  const ranked = discovered.length ? rankDiscoveredModels(discovered) : modelPreferences();
+  return ranked.slice(0, MAX_MODEL_ATTEMPTS);
 }
 
 export async function probeGeminiAccess(): Promise<{
   reachable: boolean;
+  quotaExceeded?: boolean;
   model?: string;
   availableModels?: string[];
   modelsTried?: string[];
@@ -187,24 +195,49 @@ export async function probeGeminiAccess(): Promise<{
   }
 
   const availableModels = await listAvailableGeminiModels();
-  const chain = await modelChain();
+  const ranked = rankDiscoveredModels(
+    availableModels.length ? availableModels : modelPreferences(),
+  );
+  const toTry = cachedWorkingModel ? [cachedWorkingModel] : ranked.slice(0, 1);
 
-  try {
-    await generateContent([{ text: 'Reply with JSON only: {"ok":true}' }]);
-    return {
-      reachable: true,
-      model: lastSuccessfulModel ?? geminiModelId(),
-      availableModels,
-      modelsTried: chain,
-    };
-  } catch (err) {
-    return {
-      reachable: false,
-      availableModels,
-      modelsTried: chain,
-      error: err instanceof Error ? err.message.slice(0, 320) : String(err),
-    };
+  for (const model of toTry) {
+    try {
+      await generateContentWithModel(model, [{ text: 'Reply with JSON only: {"ok":true}' }]);
+      cachedWorkingModel = model;
+      return {
+        reachable: true,
+        model,
+        availableModels,
+        modelsTried: toTry,
+      };
+    } catch (err) {
+      if (err instanceof GeminiApiError && err.status === 429) {
+        return {
+          reachable: false,
+          quotaExceeded: true,
+          availableModels,
+          modelsTried: toTry,
+          error: geminiAccessHint(err),
+        };
+      }
+      if (err instanceof GeminiApiError && (err.status === 403 || err.status === 404)) {
+        return {
+          reachable: false,
+          availableModels,
+          modelsTried: toTry,
+          error: err.message.slice(0, 320),
+        };
+      }
+      return {
+        reachable: false,
+        availableModels,
+        modelsTried: toTry,
+        error: err instanceof Error ? err.message.slice(0, 320) : String(err),
+      };
+    }
   }
+
+  return { reachable: false, availableModels, modelsTried: toTry, error: "No model to probe." };
 }
 
 function offlineImageCheck(imageDataUrl: string): ModerationResult {
@@ -252,22 +285,25 @@ async function generateContentWithModel(model: string, parts: unknown[]): Promis
   };
   const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
   lastSuccessfulModel = model;
+  cachedWorkingModel = model;
   return text.trim();
 }
 
 async function generateContent(parts: unknown[]): Promise<string> {
   const tried = await modelChain();
   const failures: string[] = [];
-  let lastErr: unknown;
 
   for (const model of tried) {
     try {
       return await generateContentWithModel(model, parts);
     } catch (err) {
-      lastErr = err;
+      if (err instanceof GeminiApiError && err.status === 429) {
+        throw err;
+      }
       if (err instanceof GeminiApiError && (err.status === 403 || err.status === 404)) {
         failures.push(`${model} (${err.status})`);
         console.warn(`[milc] Gemini model ${model} unavailable (${err.status}), trying next…`);
+        cachedWorkingModel = null;
         continue;
       }
       throw err;
@@ -278,7 +314,7 @@ async function generateContent(parts: unknown[]): Promise<string> {
     404,
     failures.length
       ? `No reachable Gemini model for this API key. Tried: ${failures.join(", ")}`
-      : `No Gemini models configured. Set GEMINI_MODEL in backend/.env`,
+      : "No Gemini models configured. Set GEMINI_MODEL in backend/.env",
   );
 }
 
