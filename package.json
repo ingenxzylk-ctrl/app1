@@ -1,29 +1,21 @@
 {
-  "name": "facial-skin-analysis",
-  "version": "0.1.0",
+  "name": "milc-skin-analysis",
+  "version": "1.0.0",
   "private": true,
+  "workspaces": [
+    "frontend",
+    "backend",
+    "shared"
+  ],
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
+    "dev": "concurrently -n backend,frontend -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm run dev --workspace backend",
+    "dev:client": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace frontend",
     "test": "vitest run"
   },
-  "dependencies": {
-    "next": "^15.3.1",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
-  },
   "devDependencies": {
-    "@eslint/eslintrc": "^3.3.1",
-    "@types/node": "^22.14.1",
-    "@types/react": "^19.1.2",
-    "@types/react-dom": "^19.1.2",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^9.25.1",
-    "eslint-config-next": "^15.3.1",
-    "postcss": "^8.5.3",
-    "tailwindcss": "^3.4.17",
+    "concurrently": "^9.1.2",
     "typescript": "^5.8.3",
     "vitest": "^3.1.2"
   }
