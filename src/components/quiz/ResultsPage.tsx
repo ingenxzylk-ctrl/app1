@@ -192,7 +192,7 @@ export function ResultsPage() {
       <div className="rounded-[28px] bg-card p-6 shadow-tray">
         <h2 className="font-serif text-xl text-ink">Save this session</h2>
         <p className="mt-1 text-sm text-muted">
-          Optional. Stores this attempt in server memory and gives you a resume link.
+          Optional. Stores this attempt on the server and gives you a resume link.
         </p>
         <button
           type="button"

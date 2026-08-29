@@ -37,7 +37,9 @@ export function ResumeClient({ id }: { id: string }) {
       {error ? (
         <>
           <h1 className="font-serif text-3xl text-ink">We couldn’t find that session</h1>
-          <p className="mt-3 text-sm text-muted">{error} Server memory resets when the process restarts.</p>
+          <p className="mt-3 text-sm text-muted">
+            {error} Saved sessions live on this server and may expire if the store file is cleared.
+          </p>
           <Link href="/quiz" className="mt-6 rounded-full bg-ink px-5 py-3 text-sm text-ivory">
             Start a new assessment
           </Link>
