@@ -9,6 +9,7 @@ import {
   hasGeminiKey,
   isGeminiAccessBlocked,
   moderateFaceImage,
+  probeGeminiAccess,
 } from "./gemini";
 import { loadSession, saveSession } from "./store";
 
@@ -16,12 +17,16 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "12mb" }));
 
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
+  const hasKey = hasGeminiKey();
+  const probe = hasKey ? await probeGeminiAccess() : { reachable: false, error: "No API key" };
   res.json({
     ok: true,
     service: "milc-skin-analysis",
-    aiMode: hasGeminiKey() ? "gemini" : "fallback",
-    geminiModel: geminiModelId(),
+    aiMode: hasKey ? (probe.reachable ? "gemini" : "gemini-blocked") : "fallback",
+    geminiModel: probe.model ?? geminiModelId(),
+    geminiReachable: probe.reachable,
+    geminiError: probe.reachable ? undefined : probe.error,
   });
 });
 
@@ -60,6 +65,12 @@ app.post("/api/skin/moderate", async (req, res) => {
     }
     res.json(await moderateFaceImage(image));
   } catch (err) {
+    if (isGeminiAccessBlocked(err)) {
+      const image = (req.body as { image?: string }).image ?? "";
+      const ok = image.startsWith("data:image/") && image.length > 80;
+      res.json({ safe: ok, faceVisible: ok, issues: [], source: "fallback" });
+      return;
+    }
     res.status(500).json({ error: err instanceof Error ? err.message : "Moderation failed." });
   }
 });
@@ -118,5 +129,6 @@ app.post("/api/skin/analyze", async (req, res) => {
 const port = Number(process.env.PORT || 3001);
 app.listen(port, () => {
   console.log(`[milc] server listening on http://localhost:${port}`);
-  console.log(`[milc] AI mode: ${hasGeminiKey() ? "gemini" : "fallback"}`);
+  console.log(`[milc] Gemini model target: ${geminiModelId()}`);
+  console.log(`[milc] AI mode: ${hasGeminiKey() ? "key set" : "fallback (no key)"}`);
 });

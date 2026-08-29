@@ -1,8 +1,17 @@
 import type { Gender, ImageQuality, ModerationResult, SkinAIAnalysis, TraitFinding, TraitKey } from "@milc/shared";
 import { emptyTrait } from "@milc/shared";
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+
+/** Models your AI Studio Rate Limit page must show with quota (not 0/0). */
+const MODEL_FALLBACK_CHAIN = [
+  process.env.GEMINI_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  "gemini-3-flash",
+  "gemini-2.5-flash-lite",
+].filter((m): m is string => Boolean(m));
+
+let lastSuccessfulModel: string | null = null;
 
 const ANALYZER_PROMPT = `You are an expert dermatological computer vision analyzer. Your task is to evaluate uploaded image(s) of a user's face and accurately detect visible surface traits.
 
@@ -73,7 +82,11 @@ export function hasGeminiKey(): boolean {
 }
 
 export function geminiModelId(): string {
-  return process.env.GEMINI_MODEL || "gemini-3.6-flash";
+  return process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+}
+
+export function geminiModelInUse(): string | null {
+  return lastSuccessfulModel;
 }
 
 export class GeminiApiError extends Error {
@@ -97,12 +110,34 @@ export function isGeminiAccessBlocked(err: unknown): boolean {
 
 export function geminiAccessHint(err: unknown): string {
   if (err instanceof GeminiApiError && err.status === 403) {
-    return "Google AI denied this project (403). Set up billing in AI Studio, create a new API key, or contact Google support.";
+    return `Google AI denied this model (403). In backend/.env set GEMINI_MODEL=gemini-2.5-flash (must match a model with quota in AI Studio → Rate Limit).`;
+  }
+  if (err instanceof GeminiApiError && err.status === 404) {
+    return `Model not found (404). Set GEMINI_MODEL to one you have quota for, e.g. gemini-2.5-flash or gemini-3-flash.`;
   }
   if (err instanceof GeminiApiError && err.status === 429) {
     return "Gemini rate limit reached. Wait a minute or raise limits in AI Studio → Rate Limit.";
   }
   return "Gemini was unavailable — results used your quiz answers instead of the photo.";
+}
+
+export async function probeGeminiAccess(): Promise<{
+  reachable: boolean;
+  model?: string;
+  error?: string;
+}> {
+  if (!hasGeminiKey()) {
+    return { reachable: false, error: "GEMINI_API_KEY is not set" };
+  }
+  try {
+    await generateContent([{ text: 'Reply with JSON only: {"ok":true}' }]);
+    return { reachable: true, model: lastSuccessfulModel ?? geminiModelId() };
+  } catch (err) {
+    return {
+      reachable: false,
+      error: err instanceof Error ? err.message.slice(0, 200) : String(err),
+    };
+  }
 }
 
 function offlineImageCheck(imageDataUrl: string): ModerationResult {
@@ -121,13 +156,14 @@ function dataUrlToInline(dataUrl: string): { mimeType: string; data: string } | 
   return { mimeType: match[1], data: match[2] };
 }
 
-async function generateContent(parts: unknown[]): Promise<string> {
+async function generateContentWithModel(model: string, parts: unknown[]): Promise<string> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
     throw new Error("GEMINI_API_KEY is not set");
   }
 
-  const res = await fetch(`${GEMINI_URL}?key=${key}`, {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const res = await fetch(`${url}?key=${key}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -141,14 +177,35 @@ async function generateContent(parts: unknown[]): Promise<string> {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new GeminiApiError(res.status, `Gemini error ${res.status}: ${text.slice(0, 240)}`);
+    throw new GeminiApiError(res.status, `Gemini error ${res.status} (${model}): ${text.slice(0, 200)}`);
   }
 
   const json = (await res.json()) as {
     candidates?: { content?: { parts?: { text?: string }[] } }[];
   };
   const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+  lastSuccessfulModel = model;
   return text.trim();
+}
+
+async function generateContent(parts: unknown[]): Promise<string> {
+  const tried = [...new Set(MODEL_FALLBACK_CHAIN)];
+  let lastErr: unknown;
+
+  for (const model of tried) {
+    try {
+      return await generateContentWithModel(model, parts);
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof GeminiApiError && (err.status === 403 || err.status === 404)) {
+        console.warn(`[milc] Gemini model ${model} unavailable (${err.status}), trying next…`);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr ?? new GeminiApiError(403, "No Gemini model in the fallback chain was reachable.");
 }
 
 function parseJson<T>(raw: string): T {

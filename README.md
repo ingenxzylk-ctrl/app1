@@ -61,15 +61,27 @@ The earlier error `No workspaces found: --workspace=client` means the `client` f
 
 Without `GEMINI_API_KEY`, analysis maps your answers so the quiz still finishes.
 
-Vision uses `gemini-3.6-flash` by default. Override with `GEMINI_MODEL` in `backend/.env` if Google retires that id.
+Vision defaults to **`gemini-2.5-flash`** — match a model that shows quota in AI Studio → Rate Limit (not `0 / 0`). Your screenshot shows these typically work on free tier:
+
+- `gemini-2.5-flash` (default)
+- `gemini-3-flash`
+- `gemini-2.5-flash-lite`
+
+Put the model id in `backend/.env`:
+
+```
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+`aiMode: "gemini"` in `/api/health` only meant a key was present. After this update, check **`geminiReachable: true`** — that means Google actually accepted the call.
 
 ### Gemini 403 “project has been denied access”
 
-This is a **Google AI Studio / billing / project** issue, not an app bug. From your dashboard screenshot, common fixes:
+Usually the **model id does not match your quota**. Models showing `0 / 0` in Rate Limit will return 403 or 404. Fix:
 
-1. Click **Set up billing** in [Google AI Studio](https://aistudio.google.com/) (Usage & Billing).
-2. Create a **new API key** under API Keys and paste it into `backend/.env`.
-3. Confirm **Rate Limit** — if RPM is over the limit (e.g. 6/5), wait a minute or request a higher quota.
-4. If it still says *denied access*, use **Contact support** in AI Studio — the project may be blocked.
+1. Set `GEMINI_MODEL=gemini-2.5-flash` in `backend/.env` (or `gemini-3-flash`).
+2. Restart `npm run dev`.
+3. Open http://localhost:3001/api/health — want `"geminiReachable": true`.
+4. If still blocked: **Set up billing** in AI Studio, create a **new API key**, or contact Google support.
 
-While Gemini is blocked, the quiz still completes using an **offline fallback** (your answers, not the photo). Results will show low confidence and mention the fallback.
+While Gemini is blocked, the quiz still completes using an **offline fallback** (your answers, not the photo).
