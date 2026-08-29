@@ -60,3 +60,5 @@ The earlier error `No workspaces found: --workspace=client` means the `client` f
 | `POST /api/skin/analyze` | Gemini vision (or fallback) |
 
 Without `GEMINI_API_KEY`, analysis maps your answers so the quiz still finishes.
+
+Vision uses `gemini-3.6-flash` by default. Override with `GEMINI_MODEL` in `backend/.env` if Google retires that id.
