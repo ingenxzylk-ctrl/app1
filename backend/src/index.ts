@@ -2,7 +2,14 @@ import "dotenv/config";
 import cors from "cors";
 import express from "express";
 import { fallbackAnalysis, type Gender, type QuizAnswer, type QuizState } from "@milc/shared";
-import { analyzeFaceImages, hasGeminiKey, moderateFaceImage } from "./gemini";
+import {
+  analyzeFaceImages,
+  geminiAccessHint,
+  geminiModelId,
+  hasGeminiKey,
+  isGeminiAccessBlocked,
+  moderateFaceImage,
+} from "./gemini";
 import { loadSession, saveSession } from "./store";
 
 const app = express();
@@ -14,6 +21,7 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     service: "milc-skin-analysis",
     aiMode: hasGeminiKey() ? "gemini" : "fallback",
+    geminiModel: geminiModelId(),
   });
 });
 
@@ -91,6 +99,12 @@ app.post("/api/skin/analyze", async (req, res) => {
     });
     res.json(analysis);
   } catch (err) {
+    if (body.answers && isGeminiAccessBlocked(err)) {
+      const fallback = fallbackAnalysis(body.answers);
+      fallback.summary = geminiAccessHint(err);
+      res.json(fallback);
+      return;
+    }
     if (body.answers) {
       const fallback = fallbackAnalysis(body.answers);
       fallback.summary = `Model unavailable — used deterministic fallback. ${err instanceof Error ? err.message : ""}`;

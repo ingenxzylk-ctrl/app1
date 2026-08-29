@@ -72,6 +72,49 @@ export function hasGeminiKey(): boolean {
   return Boolean(process.env.GEMINI_API_KEY);
 }
 
+export function geminiModelId(): string {
+  return process.env.GEMINI_MODEL || "gemini-3.6-flash";
+}
+
+export class GeminiApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "GeminiApiError";
+    this.status = status;
+  }
+}
+
+/** True when Google blocked the project/key or rate limits were hit. */
+export function isGeminiAccessBlocked(err: unknown): boolean {
+  if (err instanceof GeminiApiError) {
+    return err.status === 403 || err.status === 401 || err.status === 429;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /403|401|429|PERMISSION_DENIED|denied access|rate limit|quota/i.test(msg);
+}
+
+export function geminiAccessHint(err: unknown): string {
+  if (err instanceof GeminiApiError && err.status === 403) {
+    return "Google AI denied this project (403). Set up billing in AI Studio, create a new API key, or contact Google support.";
+  }
+  if (err instanceof GeminiApiError && err.status === 429) {
+    return "Gemini rate limit reached. Wait a minute or raise limits in AI Studio → Rate Limit.";
+  }
+  return "Gemini was unavailable — results used your quiz answers instead of the photo.";
+}
+
+function offlineImageCheck(imageDataUrl: string): ModerationResult {
+  const looksLikeImage = imageDataUrl.startsWith("data:image/") && imageDataUrl.length > 80;
+  return {
+    safe: looksLikeImage,
+    faceVisible: looksLikeImage,
+    issues: looksLikeImage ? [] : ["We could not read that file as an image."],
+    source: "fallback",
+  };
+}
+
 function dataUrlToInline(dataUrl: string): { mimeType: string; data: string } | null {
   const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!match) return null;
@@ -98,7 +141,7 @@ async function generateContent(parts: unknown[]): Promise<string> {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Gemini error ${res.status}: ${text.slice(0, 240)}`);
+    throw new GeminiApiError(res.status, `Gemini error ${res.status}: ${text.slice(0, 240)}`);
   }
 
   const json = (await res.json()) as {
@@ -142,13 +185,7 @@ function normalizeFinding(key: TraitKey, raw: Partial<TraitFinding> | undefined)
 
 export async function moderateFaceImage(imageDataUrl: string): Promise<ModerationResult> {
   if (!hasGeminiKey()) {
-    const looksLikeImage = imageDataUrl.startsWith("data:image/") && imageDataUrl.length > 80;
-    return {
-      safe: looksLikeImage,
-      faceVisible: looksLikeImage,
-      issues: looksLikeImage ? [] : ["We could not read that file as an image."],
-      source: "fallback",
-    };
+    return offlineImageCheck(imageDataUrl);
   }
 
   const inline = dataUrlToInline(imageDataUrl);
@@ -161,17 +198,25 @@ export async function moderateFaceImage(imageDataUrl: string): Promise<Moderatio
     };
   }
 
-  const raw = await generateContent([
-    { text: MODERATE_PROMPT },
-    { inlineData: { mimeType: inline.mimeType, data: inline.data } },
-  ]);
-  const parsed = parseJson<Omit<ModerationResult, "source">>(raw);
-  return {
-    safe: Boolean(parsed.safe),
-    faceVisible: Boolean(parsed.faceVisible),
-    issues: Array.isArray(parsed.issues) ? parsed.issues.map(String) : [],
-    source: "gemini",
-  };
+  try {
+    const raw = await generateContent([
+      { text: MODERATE_PROMPT },
+      { inlineData: { mimeType: inline.mimeType, data: inline.data } },
+    ]);
+    const parsed = parseJson<Omit<ModerationResult, "source">>(raw);
+    return {
+      safe: Boolean(parsed.safe),
+      faceVisible: Boolean(parsed.faceVisible),
+      issues: Array.isArray(parsed.issues) ? parsed.issues.map(String) : [],
+      source: "gemini",
+    };
+  } catch (err) {
+    if (isGeminiAccessBlocked(err)) {
+      console.warn("[milc] Gemini moderation unavailable:", err instanceof Error ? err.message : err);
+      return offlineImageCheck(imageDataUrl);
+    }
+    throw err;
+  }
 }
 
 export async function analyzeFaceImages(input: {

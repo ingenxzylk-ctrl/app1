@@ -62,3 +62,14 @@ The earlier error `No workspaces found: --workspace=client` means the `client` f
 Without `GEMINI_API_KEY`, analysis maps your answers so the quiz still finishes.
 
 Vision uses `gemini-3.6-flash` by default. Override with `GEMINI_MODEL` in `backend/.env` if Google retires that id.
+
+### Gemini 403 “project has been denied access”
+
+This is a **Google AI Studio / billing / project** issue, not an app bug. From your dashboard screenshot, common fixes:
+
+1. Click **Set up billing** in [Google AI Studio](https://aistudio.google.com/) (Usage & Billing).
+2. Create a **new API key** under API Keys and paste it into `backend/.env`.
+3. Confirm **Rate Limit** — if RPM is over the limit (e.g. 6/5), wait a minute or request a higher quota.
+4. If it still says *denied access*, use **Contact support** in AI Studio — the project may be blocked.
+
+While Gemini is blocked, the quiz still completes using an **offline fallback** (your answers, not the photo). Results will show low confidence and mention the fallback.
