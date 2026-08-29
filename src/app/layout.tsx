@@ -19,6 +19,14 @@ export const metadata: Metadata = {
   title: "Facial Skin Analysis",
   description:
     "A cosmetic facial skin assessment — surface traits mapped to treatment pathways, not prescriptions.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "32x32" },
+      { url: "/favicon.svg", type: "image/svg+xml" },
+    ],
+    shortcut: "/favicon.ico",
+    apple: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
