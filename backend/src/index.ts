@@ -26,7 +26,9 @@ app.get("/api/health", async (_req, res) => {
       ? "gemini"
       : probe.quotaExceeded
         ? "gemini-quota"
-        : "gemini-blocked";
+        : probe.projectDenied
+          ? "gemini-denied"
+          : "gemini-blocked";
   res.json({
     ok: true,
     service: "milc-skin-analysis",
@@ -34,6 +36,7 @@ app.get("/api/health", async (_req, res) => {
     geminiModel: probe.model ?? geminiModelId(),
     geminiReachable: probe.reachable,
     geminiQuotaExceeded: Boolean(probe.quotaExceeded),
+    geminiProjectDenied: Boolean(probe.projectDenied),
     geminiModelsAvailable: probe.availableModels,
     geminiModelsTried: probe.modelsTried,
     geminiError: probe.reachable ? undefined : probe.error,

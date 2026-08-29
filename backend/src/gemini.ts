@@ -1,16 +1,16 @@
 import type { Gender, ImageQuality, ModerationResult, SkinAIAnalysis, TraitFinding, TraitKey } from "@milc/shared";
 import { emptyTrait } from "@milc/shared";
 
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 
 function modelPreferences(): string[] {
   const env = process.env.GEMINI_MODEL;
   const defaults = [
     DEFAULT_GEMINI_MODEL,
-    "gemini-flash-latest",
-    "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.7-flash",
+    "gemini-3-flash-preview",
+    "gemini-flash-latest",
     "gemini-2.5-flash",
   ];
   if (env) return [env, ...defaults.filter((d) => d !== env)];
@@ -22,6 +22,7 @@ let lastSuccessfulModel: string | null = null;
 let cachedWorkingModel: string | null = null;
 let cachedModelList: { ids: string[]; at: number } | null = null;
 const MODEL_CACHE_MS = 5 * 60 * 1000;
+const MAX_PROBE_ATTEMPTS = 6;
 const MAX_MODEL_ATTEMPTS = 2;
 
 const ANALYZER_PROMPT = `You are an expert dermatological computer vision analyzer. Your task is to evaluate uploaded image(s) of a user's face and accurately detect visible surface traits.
@@ -121,7 +122,7 @@ export function isGeminiAccessBlocked(err: unknown): boolean {
 
 export function geminiAccessHint(err: unknown): string {
   if (err instanceof GeminiApiError && err.status === 403) {
-    return `Google AI denied this model (403). In backend/.env set GEMINI_MODEL=gemini-2.5-flash (must match a model with quota in AI Studio → Rate Limit).`;
+    return "Google AI denied this project (403). Enable billing in AI Studio, create a new API key (or new project), or contact Google support. The quiz still works offline.";
   }
   if (err instanceof GeminiApiError && err.status === 404) {
     return `Model not found or retired for new users (404). Set GEMINI_MODEL=gemini-3-flash-preview in backend/.env — not gemini-2.5-flash.`;
@@ -155,7 +156,7 @@ export async function listAvailableGeminiModels(): Promise<string[]> {
         (id) =>
           /gemini/i.test(id) &&
           /flash/i.test(id) &&
-          !/tts|image|live|embedding|robotics|native-audio|computer-use|omni|flash-lite|lite-latest|lite-preview/i.test(
+          !/tts|image|live|embedding|robotics|native-audio|computer-use|omni|flash-lite|lite-latest|lite-preview|^gemini-2\.5-flash$/i.test(
             id,
           ),
       );
@@ -188,6 +189,7 @@ async function modelChain(): Promise<string[]> {
 export async function probeGeminiAccess(): Promise<{
   reachable: boolean;
   quotaExceeded?: boolean;
+  projectDenied?: boolean;
   model?: string;
   availableModels?: string[];
   modelsTried?: string[];
@@ -201,18 +203,20 @@ export async function probeGeminiAccess(): Promise<{
   const ranked = rankDiscoveredModels(
     availableModels.length ? availableModels : modelPreferences(),
   );
-  const toTry = cachedWorkingModel ? [cachedWorkingModel] : ranked.slice(0, MAX_MODEL_ATTEMPTS);
+  const toTry = cachedWorkingModel ? [cachedWorkingModel] : ranked.slice(0, MAX_PROBE_ATTEMPTS);
   const failures: string[] = [];
+  const modelsAttempted: string[] = [];
 
   for (const model of toTry) {
+    modelsAttempted.push(model);
     try {
-      await generateContentWithModel(model, [{ text: 'Reply with JSON only: {"ok":true}' }]);
+      await generateContentWithModelRetry(model, [{ text: 'Reply with JSON only: {"ok":true}' }]);
       cachedWorkingModel = model;
       return {
         reachable: true,
         model,
         availableModels,
-        modelsTried: failures.length ? [...failures.map((f) => f.split(" ")[0]), model] : toTry,
+        modelsTried: modelsAttempted,
       };
     } catch (err) {
       if (err instanceof GeminiApiError && err.status === 429) {
@@ -220,36 +224,34 @@ export async function probeGeminiAccess(): Promise<{
           reachable: false,
           quotaExceeded: true,
           availableModels,
-          modelsTried: toTry,
+          modelsTried: modelsAttempted,
           error: geminiAccessHint(err),
         };
       }
       if (err instanceof GeminiApiError && (err.status === 403 || err.status === 404)) {
         failures.push(`${model} (${err.status})`);
         cachedWorkingModel = null;
-        if (model === process.env.GEMINI_MODEL) {
-          console.warn(
-            `[milc] GEMINI_MODEL=${model} is unavailable (${err.status}). Trying next model — update backend/.env to gemini-3-flash-preview`,
-          );
-        }
         continue;
       }
       return {
         reachable: false,
         availableModels,
-        modelsTried: toTry,
+        modelsTried: modelsAttempted,
         error: err instanceof Error ? err.message.slice(0, 320) : String(err),
       };
     }
   }
 
+  const all403 = failures.length > 0 && failures.every((f) => f.includes("(403)"));
   return {
     reachable: false,
+    projectDenied: all403,
     availableModels,
-    modelsTried: toTry,
-    error:
-      failures.length > 0
-        ? `Models unavailable: ${failures.join(", ")}. Set GEMINI_MODEL=gemini-3-flash-preview in backend/.env (gemini-2.5-flash is retired for new users).`
+    modelsTried: modelsAttempted,
+    error: all403
+      ? geminiAccessHint(new GeminiApiError(403, "project denied"))
+      : failures.length > 0
+        ? `Models unavailable: ${failures.join(", ")}. Try GEMINI_MODEL=gemini-3.6-flash in backend/.env`
         : "No model to probe.",
   };
 }
@@ -270,7 +272,11 @@ function dataUrlToInline(dataUrl: string): { mimeType: string; data: string } | 
   return { mimeType: match[1], data: match[2] };
 }
 
-async function generateContentWithModel(model: string, parts: unknown[]): Promise<string> {
+async function generateContentWithModel(
+  model: string,
+  parts: unknown[],
+  jsonMode = true,
+): Promise<string> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
     throw new Error("GEMINI_API_KEY is not set");
@@ -282,10 +288,9 @@ async function generateContentWithModel(model: string, parts: unknown[]): Promis
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts }],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-      },
+      generationConfig: jsonMode
+        ? { temperature: 0.2, responseMimeType: "application/json" }
+        : { temperature: 0.2 },
     }),
   });
 
@@ -303,13 +308,25 @@ async function generateContentWithModel(model: string, parts: unknown[]): Promis
   return text.trim();
 }
 
+/** Retry without JSON mode — structured output sometimes 403s on free tier. */
+async function generateContentWithModelRetry(model: string, parts: unknown[]): Promise<string> {
+  try {
+    return await generateContentWithModel(model, parts, true);
+  } catch (err) {
+    if (err instanceof GeminiApiError && err.status === 403) {
+      return await generateContentWithModel(model, parts, false);
+    }
+    throw err;
+  }
+}
+
 async function generateContent(parts: unknown[]): Promise<string> {
   const tried = await modelChain();
   const failures: string[] = [];
 
   for (const model of tried) {
     try {
-      return await generateContentWithModel(model, parts);
+      return await generateContentWithModelRetry(model, parts);
     } catch (err) {
       if (err instanceof GeminiApiError && err.status === 429) {
         throw err;
