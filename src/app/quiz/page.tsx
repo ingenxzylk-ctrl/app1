@@ -24,7 +24,7 @@ export default function QuizPage() {
   }, []);
 
   useEffect(() => {
-    if (state.result) setShowResults(true);
+    setShowResults(Boolean(state.result));
   }, [state.result]);
 
   const handleFinish = useCallback(
